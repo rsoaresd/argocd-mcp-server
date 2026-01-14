@@ -3,9 +3,12 @@ package e2etests
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"os/exec"
 	"strconv"
 	"testing"
+
+	toolchaintests "github.com/codeready-toolchain/toolchain-e2e/testsupport/metrics"
 
 	argocdv3 "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	"github.com/codeready-toolchain/argocd-mcp-server/internal/argocd"
@@ -13,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/rest"
 )
 
 // ------------------------------------------------------------------------------------------------
@@ -43,6 +47,17 @@ func TestServer(t *testing.T) {
 			defer session.Close()
 
 			t.Run("call/unhealthyApplications/ok", func(t *testing.T) {
+				// get the metrics before the call
+				var mcpCallsTotalMetricBefore int64
+				var mcpCallsDurationSecondsInfBucketBefore int64
+				if td.name == "http" {
+					mcpCallsTotalMetricBefore, mcpCallsDurationSecondsInfBucketBefore = getMetrics(t, "http://localhost:50081", map[string]string{
+						"method":  "tools/call",
+						"name":    "unhealthyApplications",
+						"success": "true",
+					})
+				}
+
 				// when
 				result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
 					Name: "unhealthyApplications",
@@ -69,9 +84,31 @@ func TestServer(t *testing.T) {
 				err = runtime.DefaultUnstructuredConverter.FromUnstructured(result.StructuredContent.(map[string]any), &actualStructuredContent)
 				require.NoError(t, err)
 				assert.Equal(t, expectedContent, actualStructuredContent)
+				// also, check the metrics when the server runs on HTTP
+				if td.name == "http" {
+					// get the metrics after the call
+					mcpCallsTotalMetricAfter, mcpCallsDurationSecondsInfBucketAfter := getMetrics(t, "http://localhost:50081", map[string]string{
+						"method":  "tools/call",
+						"name":    "unhealthyApplications",
+						"success": "true",
+					})
+					assert.Equal(t, mcpCallsTotalMetricBefore+1, mcpCallsTotalMetricAfter)
+					assert.Equal(t, mcpCallsDurationSecondsInfBucketBefore+1, mcpCallsDurationSecondsInfBucketAfter)
+				}
+
 			})
 
 			t.Run("call/unhealthyApplicationResources/ok", func(t *testing.T) {
+				var mcpCallsTotalMetricBefore int64
+				var mcpCallsDurationSecondsInfBucketBefore int64
+				if td.name == "http" {
+					mcpCallsTotalMetricBefore, mcpCallsDurationSecondsInfBucketBefore = getMetrics(t, "http://localhost:50081", map[string]string{
+						"method":  "tools/call",
+						"name":    "unhealthyApplicationResources",
+						"success": "true",
+					})
+				}
+
 				// when
 				result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
 					Name: "unhealthyApplicationResources",
@@ -130,9 +167,29 @@ func TestServer(t *testing.T) {
 				err = runtime.DefaultUnstructuredConverter.FromUnstructured(result.StructuredContent.(map[string]any), &actualStructuredContent)
 				require.NoError(t, err)
 				assert.Equal(t, expectedContent, actualStructuredContent)
+				if td.name == "http" {
+					// get the metrics after the call
+					mcpCallsTotalMetricAfter, mcpCallsDurationSecondsInfBucketAfter := getMetrics(t, "http://localhost:50081", map[string]string{
+						"method":  "tools/call",
+						"name":    "unhealthyApplicationResources",
+						"success": "true",
+					})
+					assert.Equal(t, mcpCallsTotalMetricBefore+1, mcpCallsTotalMetricAfter)
+					assert.Equal(t, mcpCallsDurationSecondsInfBucketBefore+1, mcpCallsDurationSecondsInfBucketAfter)
+				}
 			})
 
 			t.Run("call/unhealthyApplicationResources/argocd-error", func(t *testing.T) {
+				var mcpCallsTotalMetricBefore int64
+				var mcpCallsDurationSecondsInfBucketBefore int64
+				if td.name == "http" {
+					mcpCallsTotalMetricBefore, mcpCallsDurationSecondsInfBucketBefore = getMetrics(t, "http://localhost:50081", map[string]string{
+						"method":  "tools/call",
+						"name":    "unhealthyApplicationResources",
+						"success": "false",
+					})
+				}
+
 				// when
 				result, err := session.CallTool(context.Background(), &mcp.CallToolParams{
 					Name: "unhealthyApplicationResources",
@@ -144,6 +201,16 @@ func TestServer(t *testing.T) {
 				// then
 				require.NoError(t, err)
 				assert.True(t, result.IsError)
+				if td.name == "http" {
+					// get the metrics after the call
+					mcpCallsTotalMetricAfter, mcpCallsDurationSecondsInfBucketAfter := getMetrics(t, "http://localhost:50081", map[string]string{
+						"method":  "tools/call",
+						"name":    "unhealthyApplicationResources",
+						"success": "false",
+					})
+					assert.Equal(t, mcpCallsTotalMetricBefore+1, mcpCallsTotalMetricAfter)
+					assert.Equal(t, mcpCallsDurationSecondsInfBucketBefore+1, mcpCallsDurationSecondsInfBucketAfter)
+				}
 			})
 		})
 	}
@@ -153,11 +220,11 @@ func TestServer(t *testing.T) {
 		init func(*testing.T) *mcp.ClientSession
 	}{
 		{
-			name: "stdio",
+			name: "stdio-unreachable",
 			init: newStdioSession(true, "http://localhost:50085", "another-token", true), // invalid URL and token for the Argo CD server
 		},
 		{
-			name: "http",
+			name: "http-unreachable",
 			init: newHTTPSession("http://localhost:50082/mcp"), // invalid URL and token for the Argo CD server
 		},
 	}
@@ -181,6 +248,32 @@ func TestServer(t *testing.T) {
 		})
 
 	}
+}
+
+func getMetrics(t *testing.T, mcpServerURL string, labels map[string]string) (int64, int64) { //nolint:unparam
+	labelStrings := make([]string, 0, 2*len(labels))
+	for k, v := range labels {
+		labelStrings = append(labelStrings, k)
+		labelStrings = append(labelStrings, v)
+	}
+	var mcpCallsTotalMetric int64
+	var mcpCallsDurationSecondsInf int64
+
+	if value, err := toolchaintests.GetMetricValue(&rest.Config{}, mcpServerURL, `mcp_calls_total`, labelStrings); err == nil {
+		mcpCallsTotalMetric = int64(value)
+	} else {
+		t.Logf("failed to get mcp_calls_total metric, assuming 0: %v", err)
+		mcpCallsTotalMetric = 0
+	}
+	if buckets, err := toolchaintests.GetHistogramBuckets(&rest.Config{}, mcpServerURL, `mcp_call_duration_seconds`, labelStrings); err == nil {
+		for _, bucket := range buckets {
+			if bucket.GetUpperBound() == math.Inf(1) {
+				mcpCallsDurationSecondsInf = int64(bucket.GetCumulativeCount()) //nolint:gosec
+				break
+			}
+		}
+	}
+	return mcpCallsTotalMetric, mcpCallsDurationSecondsInf
 }
 
 func newStdioSession(mcpServerDebug bool, argocdURL string, argocdToken string, argocdInsecureURL bool) func(*testing.T) *mcp.ClientSession {

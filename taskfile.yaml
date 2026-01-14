@@ -14,10 +14,14 @@ tasks:
       - $GOPATH/bin/golangci-lint run -v -c .golangci.yml ./...
 
   # E2E Tests
-  install:
+  build:
     cmds:
       - go build -o $GOPATH/bin/argocd-mcp-server main.go
 
+  podman-compose-build:
+    cmds:
+      - podman-compose build
+  
   podman-compose-up:
     cmds:
       - podman-compose up -d
@@ -28,7 +32,7 @@ tasks:
   
   test-e2e:
     deps:
-      - install
+      - build
       - podman-compose-up
     cmds:
       # The idiomatic way to disable test caching explicitly is to use -count=1
